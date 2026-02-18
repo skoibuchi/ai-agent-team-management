@@ -29,8 +29,8 @@ export interface Task {
   title: string
   description: string
   priority: 'low' | 'medium' | 'high'
-  status: 'pending' | 'running' | 'completed' | 'failed'
-  detailed_status?: 'pending' | 'running' | 'waiting_input' | 'waiting_approval' | 'completed' | 'failed'
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+  detailed_status?: 'pending' | 'running' | 'waiting_input' | 'waiting_approval' | 'completed' | 'failed' | 'cancelled'
   assigned_to?: number
   parent_task_id?: number
   mode: 'manual' | 'auto' | 'team'

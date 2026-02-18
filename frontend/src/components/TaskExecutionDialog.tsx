@@ -270,9 +270,10 @@ const TaskExecutionDialog: React.FC<TaskExecutionDialogProps> = ({ open, task, o
     fetchInteractions()
   }, [open, task, fetchInteractions])
 
-  // ポーリング（タスク実行中のみ、3秒ごとに差分取得）
+  // ポーリング（タスク実行中または入力待ち中、3秒ごとに差分取得）
   useEffect(() => {
-    if (!open || !task || task.status !== 'running') return
+    if (!open || !task) return
+    if (task.status !== 'running' && task.status !== 'waiting_for_input') return
 
     const interval = setInterval(() => {
       fetchNewInteractions()

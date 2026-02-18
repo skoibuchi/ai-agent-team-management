@@ -32,6 +32,9 @@ import { api } from '@/services/api'
 import type { Task } from '@/types'
 import TaskExecutionDialog from '@/components/TaskExecutionDialog'
 
+// ポーリング間隔（ミリ秒）
+const POLLING_INTERVAL = 3000
+
 export default function Tasks() {
   const { tasks, agents, loading, fetchTasks, fetchAgents, addTask, updateTask, removeTask } = useStore()
   const [openDialog, setOpenDialog] = useState(false)
@@ -58,6 +61,7 @@ export default function Tasks() {
   const [toolPage, setToolPage] = useState<number>(1)
   const toolsPerPage = 10
   const [lastUpdateTime, setLastUpdateTime] = useState<string | null>(null)
+  const [executingTaskIds, setExecutingTaskIds] = useState<Set<number>>(new Set())
 
   // 初回データ取得
   useEffect(() => {
@@ -104,8 +108,8 @@ export default function Tasks() {
       }
     }
 
-    // 3秒ごとにポーリング
-    const interval = setInterval(fetchUpdatedTasks, 3000)
+    // ポーリング
+    const interval = setInterval(fetchUpdatedTasks, POLLING_INTERVAL)
 
     return () => {
       console.log('[Tasks] Stopping polling')
@@ -234,11 +238,36 @@ export default function Tasks() {
   }
 
   const handleExecute = async (taskId: number) => {
+    // 二度押し防止：既に実行中の場合は何もしない
+    if (executingTaskIds.has(taskId)) {
+      return
+    }
+    
     try {
+      // 実行中リストに追加
+      setExecutingTaskIds(prev => new Set(prev).add(taskId))
+      
+      // 即座にローカルステートを更新（楽観的更新）
+      updateTask(taskId, { status: 'running' })
+      
+      // API呼び出し
       await api.executeTask(taskId)
+      
+      // サーバーから最新データを取得
       fetchTasks()
     } catch (error) {
       console.error('Failed to execute task:', error)
+      // エラー時は元に戻す
+      updateTask(taskId, { status: 'pending' })
+    } finally {
+      // 実行中リストから削除（ポーリング間隔分待って、サーバーから更新されるまで待つ）
+      setTimeout(() => {
+        setExecutingTaskIds(prev => {
+          const newSet = new Set(prev)
+          newSet.delete(taskId)
+          return newSet
+        })
+      }, POLLING_INTERVAL)
     }
   }
 
@@ -274,6 +303,8 @@ export default function Tasks() {
         return 'warning'
       case 'failed':
         return 'error'
+      case 'cancelled':
+        return 'default'
       case 'pending':
         return 'default'
       default:
@@ -295,6 +326,8 @@ export default function Tasks() {
         return '完了'
       case 'failed':
         return '失敗'
+      case 'cancelled':
+        return 'キャンセル済み'
       default:
         return detailedStatus
     }
@@ -368,6 +401,7 @@ export default function Tasks() {
     { label: '承認待ち', status: 'waiting_approval' },
     { label: '完了', status: 'completed' },
     { label: '失敗', status: 'failed' },
+    { label: 'キャンセル済み', status: 'cancelled' },
   ]
 
   const currentTasks = filterTasks(tabLabels[selectedTab].status)
@@ -450,7 +484,7 @@ export default function Tasks() {
                   </Box>
                 </Box>
 
-                {task.status === 'running' && (
+                {(task.status === 'running' || task.status === 'waiting_for_input') && (
                   <Box mb={2}>
                     <LinearProgress />
                   </Box>
@@ -471,7 +505,7 @@ export default function Tasks() {
                     </Typography>
                   </Box>
                   <Box display="flex" gap={1}>
-                    {(task.status === 'running' || task.status === 'completed' || task.status === 'failed') && (
+                    {(task.status === 'running' || task.status === 'waiting_for_input' || task.status === 'completed' || task.status === 'failed') && (
                       <IconButton
                         size="small"
                         color="info"
@@ -490,6 +524,7 @@ export default function Tasks() {
                           size="small"
                           color="primary"
                           onClick={() => handleExecute(task.id)}
+                          disabled={executingTaskIds.has(task.id)}
                           title="実行"
                         >
                           <PlayArrow />
@@ -504,7 +539,7 @@ export default function Tasks() {
                         </IconButton>
                       </>
                     )}
-                    {task.status === 'running' && (
+                    {(task.status === 'running' || task.status === 'waiting_for_input') && (
                       <IconButton
                         size="small"
                         color="warning"
