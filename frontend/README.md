@@ -73,7 +73,7 @@ npm install
 npm run dev
 ```
 
-ブラウザで `http://localhost:5173` を開きます。
+ブラウザで `http://localhost:3000` を開きます。
 
 ### ビルド
 
@@ -276,7 +276,7 @@ Material-UIのテーマシステムを使用：
 export default defineConfig({
   plugins: [react()],
   server: {
-    port: 5173,
+    port: 3000,
     proxy: {
       '/api': 'http://localhost:5000',
       '/socket.io': {
