@@ -336,11 +336,10 @@ LangGraphの`SqliteSaver`により、エージェントとの会話履歴を永�
 
 詳細なドキュメントはプロジェクトルートにあります：
 
-- [SETUP.md](SETUP.md) - セットアップガイド
-- [WATSONX_SETUP.md](WATSONX_SETUP.md) - watsonx.ai設定ガイド
-- [TOOLS_EXPLANATION.md](TOOLS_EXPLANATION.md) - ツールシステムの詳細
-- [HUMAN_IN_THE_LOOP_DESIGN.md](HUMAN_IN_THE_LOOP_DESIGN.md) - HITL機能の設計
-- [TEST_GUIDE.md](TEST_GUIDE.md) - テストガイド
+- [SETUP.md](docs/SETUP.md) - セットアップガイド
+- [TOOLS_EXPLANATION.md](docs/TOOLS_EXPLANATION.md) - ツールシステムの詳細
+- [HUMAN_IN_THE_LOOP_DESIGN.md](docs/HUMAN_IN_THE_LOOP_DESIGN.md) - HITL機能の設計
+- [TEST_GUIDE.md](docs/TEST_GUIDE.md) - テストガイド
 
 ## 🗺️ 実装状況
 
