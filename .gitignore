@@ -41,13 +41,27 @@ venv.bak/
 .env.local
 .env.*.local
 
-# Database
+# Database files (contains user data and API keys)
 *.db
 *.sqlite
 *.sqlite3
+*.db-shm
+*.db-wal
+*.db-journal
+backend/data/*.db
+backend/data/*.sqlite
+backend/data/*.sqlite3
+backend/data/*.db-shm
+backend/data/*.db-wal
+backend/data/*.db-journal
 
-# Agent memory database (but keep the directory)
+# Keep the data directory structure
+!backend/data/
 !backend/data/.gitkeep
+
+# LangGraph checkpoints (contains conversation history)
+backend/data/checkpoints/
+backend/data/langgraph_checkpoints.db*
 
 # Logs
 logs/
@@ -75,3 +89,15 @@ build/
 .cache/
 temp/
 tmp/
+
+# Security - API Keys and Secrets
+backend/app/config.py.local
+**/secrets.json
+**/credentials.json
+
+# Generated tools (may contain sensitive code)
+backend/app/tools/generated/
+
+# Test outputs
+TEST_GUIDE_summary_output.txt
+*.test.log
