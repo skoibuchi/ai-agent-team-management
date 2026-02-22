@@ -5,11 +5,15 @@ LangGraphAgentを使用した自律的なタスク実行
 from datetime import datetime
 from typing import Dict, Any, List
 import threading
+import os
+import sqlite3
 from app import db
 from app.models import Task, Agent, ExecutionLog, TaskInteraction
 from app.services.llm_service import LLMService
 from app.services.tool_service import ToolService
 from app.agents.langgraph_agent import LangGraphAgent
+from app.agents.supervisor_agent import SupervisorAgent
+from app.agents.dynamic_team_agent import DynamicTeamAgent
 from app.tools import ToolRegistry, create_human_input_tool
 from app.websocket.events import (
     emit_task_interaction_new,
@@ -18,6 +22,7 @@ from app.websocket.events import (
     emit_task_completed,
     emit_task_failed
 )
+from langgraph.checkpoint.sqlite import SqliteSaver
 
 
 class ExecutionService:
@@ -83,6 +88,14 @@ class ExecutionService:
         agent = Agent.query.get(task.assigned_to)
         if not agent:
             raise ValueError(f'Agent {task.assigned_to} not found')
+        
+        # Dynamic Team Patternの場合（team_member_idsとleader_agent_idが設定されている）
+        if task.team_member_ids and task.leader_agent_id:
+            return self._execute_with_dynamic_team(task)
+        
+        # Supervisorエージェントの場合、チーム実行モードを使用
+        if agent.agent_type == 'supervisor':
+            return self._execute_with_supervisor(task, agent)
         
         try:
             # タスク開始
@@ -186,7 +199,8 @@ class ExecutionService:
                             'tool_calls': [
                                 {
                                     'name': tc.get('name') if isinstance(tc, dict) else getattr(tc, 'name', None),
-                                    'args': tc.get('args') if isinstance(tc, dict) else getattr(tc, 'args', None)
+                                    'args': tc.get('args') if isinstance(tc, dict) else getattr(tc, 'args', None),
+                                    'id': tc.get('id') if isinstance(tc, dict) else getattr(tc, 'id', None)
                                 }
                                 for tc in tool_calls
                             ]
@@ -225,9 +239,11 @@ class ExecutionService:
                 raise Exception("Task was cancelled")
             
             # ストリーミング実行でログ記録
+            # thread_idにタイムスタンプを追加して一意性を保証（再起動後のID重複を防ぐ）
+            thread_id = f"task-{task.id}-{int(task.created_at.timestamp())}"
             result = langgraph_agent.execute_with_streaming(
                 task=task.description,
-                thread_id=f"task-{task.id}",
+                thread_id=thread_id,
                 callback=log_interaction,
                 auto_mode=task.auto_mode
             )
@@ -270,8 +286,11 @@ class ExecutionService:
                 
                 db.session.commit()
                 
-                # WebSocketでタスク完了イベントを送信
-                emit_task_completed(task.id, result)
+                # WebSocketでタスク完了イベントを送信（エラーが発生してもタスクステータスには影響させない）
+                try:
+                    emit_task_completed(task.id, result)
+                except Exception as ws_error:
+                    print(f"WebSocket emit error (task completed): {ws_error}")
             else:
                 # 失敗時の処理
                 error_message = result.get('error', 'タスクの実行に失敗しました')
@@ -307,7 +326,7 @@ class ExecutionService:
                 emit_task_failed(task.id, error_message)
             
             return result
-            
+        
         except Exception as e:
             # キャンセルされた場合の処理
             if "cancelled" in str(e).lower() or task.status == 'cancelled':
@@ -377,11 +396,11 @@ class ExecutionService:
             List[Any]: ツール一覧（LangChain BaseToolのリスト）
         """
         # エージェントのデフォルトツール
-        tool_names = set(agent.tool_names or [])
+        tool_names = set(agent.tool_names_list)
         
         # タスク固有のツールを追加
-        if task.additional_tool_names:
-            tool_names.update(task.additional_tool_names)
+        if task.additional_tool_names_list:
+            tool_names.update(task.additional_tool_names_list)
         
         # ツール名が指定されていない場合は空のリストを返す（ツール使用不可）
         # 注意: human_inputツールは別途ExecutionServiceで追加されます
@@ -394,6 +413,9 @@ class ExecutionService:
         for name in tool_names:
             tool = ToolRegistry.get_tool(name)
             if tool:
+                # HumanInputToolの場合はtask_idを設定
+                if name == 'human_input' and hasattr(tool, 'task_id'):
+                    tool.task_id = task.id
                 tools.append(tool)
             else:
                 print(f"Warning: Tool '{name}' not found in ToolRegistry")
@@ -465,6 +487,12 @@ class ExecutionService:
             created_at=datetime.utcnow()
         )
         db.session.add(interaction)
+        
+        # Taskのupdated_atを更新して差分取得APIで検知できるようにする
+        task = Task.query.get(task_id)
+        if task:
+            task.updated_at = datetime.utcnow()
+        
         db.session.commit()
         
         # WebSocketでリアルタイム配信
@@ -529,3 +557,530 @@ class ExecutionService:
         )
         
         db.session.commit()
+
+    
+    def _execute_with_supervisor(self, task: Task, supervisor: Agent) -> Dict[str, Any]:
+        """
+        Supervisorエージェントを使用してタスクを実行
+        
+        Args:
+            task: タスク
+            supervisor: Supervisorエージェント
+            
+        Returns:
+            Dict[str, Any]: 実行結果
+        """
+        try:
+            # タスク開始
+            task.status = 'running'
+            task.started_at = datetime.utcnow()
+            supervisor.status = 'running'
+            db.session.commit()
+            
+            # WebSocketでタスク開始イベントを送信
+            emit_task_started(task.id, supervisor.id)
+            
+            # 実行ログを作成
+            self._log_action(task.id, supervisor.id, 'supervisor_task_started', 'started')
+            
+            # Supervisorのワーカーを取得
+            workers = supervisor.workers
+            if not workers:
+                raise ValueError(f'Supervisor {supervisor.name} has no workers assigned')
+            
+            print(f"Supervisor '{supervisor.name}' managing {len(workers)} workers:")
+            for worker in workers:
+                print(f"  - {worker.name} ({worker.role})")
+                
+                # データベースパスを設定
+            data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+            os.makedirs(data_dir, exist_ok=True)
+            db_path = os.path.join(data_dir, "agent_memory.db")
+            
+            # SqliteSaverを作成
+            conn = sqlite3.connect(db_path, check_same_thread=False)
+            checkpointer = SqliteSaver(conn)
+            
+            # SupervisorAgentを作成（ToolRegistryはクラスメソッドで使用されるため、インスタンスは不要）
+            # 各ワーカーのLLM設定を取得して設定
+            for worker in workers:
+                if not worker.llm_config or not worker.llm_config.get('api_key'):
+                    worker.llm_config = self._get_llm_config(worker)
+            
+            supervisor_agent = SupervisorAgent(
+                supervisor=supervisor,
+                workers=list(workers),
+                tool_registry=ToolRegistry(),
+                checkpointer=checkpointer
+            )
+            
+            # インタラクション記録用のコールバック
+            def log_interaction(step: Dict[str, Any]):
+                """Supervisorのステップをログ記録"""
+                # ステップの内容を解析してログ記録
+                node_name = list(step.keys())[0] if step else 'unknown'
+                node_data = step.get(node_name, {})
+                
+                if node_name == 'supervisor':
+                    # Supervisorの決定
+                    messages = node_data.get('messages', [])
+                    if messages:
+                        last_message = messages[-1]
+                        content = getattr(last_message, 'content', str(last_message))
+                        self._log_interaction(
+                            task_id=task.id,
+                            interaction_type='agent_thinking',
+                            content=f"[Supervisor] {content}",
+                            metadata={'node': 'supervisor'}
+                        )
+                elif node_name in [w.name for w in workers]:
+                    # ワーカーの実行
+                    messages = node_data.get('messages', [])
+                    if messages:
+                        last_message = messages[-1]
+                        content = getattr(last_message, 'content', str(last_message))
+                        self._log_interaction(
+                            task_id=task.id,
+                            interaction_type='info',
+                            content=f"[Worker: {node_name}] {content}",
+                            metadata={'node': node_name, 'worker': True}
+                        )
+            
+            # タスクを実行
+            print("Starting supervisor task execution:")
+            print(f"  - Task ID: {task.id}")
+            print(f"  - Description: {task.description}")
+            print(f"  - Supervisor: {supervisor.name}")
+            
+            # 実行前にキャンセルチェック
+            db.session.refresh(task)
+            if task.status == 'cancelled':
+                print(f"Task {task.id} was cancelled before execution")
+                raise Exception("Task was cancelled")
+            
+            # ストリーミング実行でログ記録
+            thread_id = f"supervisor-task-{task.id}-{int(task.created_at.timestamp())}"
+            
+            for step in supervisor_agent.stream(task.description, thread_id):
+                # ステップをログ記録
+                log_interaction(step)
+                
+                # キャンセルチェック
+                db.session.refresh(task)
+                if task.status == 'cancelled':
+                    print(f"Task {task.id} was cancelled during execution")
+                    raise Exception("Task was cancelled")
+            
+            # 最終結果を取得
+            result = supervisor_agent.invoke(task.description, thread_id)
+            
+            print("Supervisor task execution completed:")
+            print(f"  - Result: {result}")
+            
+            # 成功時の処理
+            self._log_interaction(
+                task_id=task.id,
+                interaction_type='info',
+                content='タスクが正常に完了しました（Supervisor Pattern）'
+            )
+            
+            task.status = 'completed'
+            task.completed_at = datetime.utcnow()
+            task.result = result
+            supervisor.status = 'idle'
+            
+            # 成功ログ
+            execution_time = (task.completed_at - task.started_at).total_seconds()
+            self._log_action(
+                task.id,
+                supervisor.id,
+                'supervisor_task_completed',
+                'completed',
+                output_data=result,
+                execution_time=execution_time
+            )
+            
+            db.session.commit()
+            
+            # WebSocketでタスク完了イベントを送信（エラーが発生してもタスクステータスには影響させない）
+            try:
+                emit_task_completed(task.id, result)
+            except Exception as ws_error:
+                print(f"WebSocket emit error (supervisor task completed): {ws_error}")
+            
+            return {'success': True, 'result': result}
+        
+        except Exception as e:
+            # キャンセルされた場合の処理
+            if "cancelled" in str(e).lower() or task.status == 'cancelled':
+                print(f"Supervisor task {task.id} was cancelled")
+                
+                if task.status != 'cancelled':
+                    task.status = 'cancelled'
+                
+                task.completed_at = datetime.utcnow()
+                task.error_message = 'Task was cancelled by user'
+                supervisor.status = 'idle'
+                
+                self._log_interaction(
+                    task_id=task.id,
+                    interaction_type='info',
+                    content='タスクがキャンセルされました（Supervisor Pattern）'
+                )
+                
+                self._log_action(
+                    task.id,
+                    supervisor.id,
+                    'supervisor_task_cancelled',
+                    'failed',
+                    error_message='Task cancelled by user'
+                )
+                
+                db.session.commit()
+                emit_task_failed(task.id, 'Task cancelled by user')
+                
+                return {'success': False, 'error': 'Task cancelled by user'}
+            
+            # その他のエラー処理
+            task.status = 'failed'
+            task.completed_at = datetime.utcnow()
+            task.error_message = str(e)
+            supervisor.status = 'idle'
+            
+            self._log_action(
+                task.id,
+                supervisor.id,
+                'supervisor_task_failed',
+                'failed',
+                error_message=str(e)
+            )
+            
+            db.session.commit()
+            emit_task_failed(task.id, str(e))
+            
+            raise
+    
+    def _get_llm_config(self, agent: Agent) -> Dict[str, Any]:
+        """
+        エージェントのLLM設定を取得
+        
+        Args:
+            agent: エージェント
+            
+        Returns:
+            Dict[str, Any]: LLM設定
+        """
+        llm_config = agent.llm_config or {}
+        
+        if not llm_config or not llm_config.get('api_key'):
+            # 設定画面からLLM設定を取得
+            from app.models.llm_setting import LLMSetting
+            llm_setting = LLMSetting.query.filter_by(
+                provider=agent.llm_provider,
+                is_active=True
+            ).first()
+            
+            if llm_setting:
+                llm_config = dict(llm_setting.config) if llm_setting.config else {}
+                llm_config.update({
+                    'api_key': llm_setting.get_api_key(),
+                    'base_url': llm_setting.base_url,
+                    'model': agent.llm_model or llm_setting.default_model,
+                    'temperature': llm_config.get('temperature', 0.7) if llm_config else 0.7,
+                    'max_tokens': llm_config.get('max_tokens', 2000) if llm_config else 2000
+                })
+        
+        return llm_config
+
+    
+    def _execute_with_dynamic_team(self, task: Task) -> Dict[str, Any]:
+        """
+        Dynamic Team Patternを使用してタスクを実行
+        
+        Args:
+            task: タスク
+            
+        Returns:
+            Dict[str, Any]: 実行結果
+        """
+        try:
+            # リーダーエージェントを取得
+            leader = Agent.query.get(task.leader_agent_id)
+            if not leader:
+                raise ValueError(f'Leader agent {task.leader_agent_id} not found')
+            
+            # チームメンバーを取得
+            member_ids = task.team_member_ids_list
+            if not member_ids:
+                raise ValueError('No team members assigned')
+            
+            members = Agent.query.filter(Agent.id.in_(member_ids)).all()
+            if len(members) != len(member_ids):
+                raise ValueError('Some team members not found')
+            
+            # タスク開始
+            task.status = 'running'
+            task.started_at = datetime.utcnow()
+            leader.status = 'running'
+            db.session.commit()
+            
+            # WebSocketでタスク開始イベントを送信
+            emit_task_started(task.id, leader.id)
+            
+            # 実行ログを作成
+            self._log_action(task.id, leader.id, 'dynamic_team_task_started', 'started')
+            
+            print(f"Dynamic Team: Leader '{leader.name}' managing {len(members)} members:")
+            for member in members:
+                print(f"  - {member.name} ({member.role})")
+            
+            # データベースパスを設定
+            data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+            os.makedirs(data_dir, exist_ok=True)
+            db_path = os.path.join(data_dir, "agent_memory.db")
+            
+            # SqliteSaverを作成
+            conn = sqlite3.connect(db_path, check_same_thread=False)
+            checkpointer = SqliteSaver(conn)
+            
+            # リーダーとメンバーのLLM設定を取得してLLMインスタンスを作成
+            leader_llm_config = self._get_llm_config(leader)
+            
+            # リーダーのLLMインスタンスを作成
+            if leader.llm_provider == 'openai':
+                from langchain_openai import ChatOpenAI
+                leader_llm = ChatOpenAI(
+                    model=leader_llm_config.get('model', 'gpt-4'),
+                    api_key=leader_llm_config.get('api_key'),
+                    base_url=leader_llm_config.get('base_url'),
+                    temperature=leader_llm_config.get('temperature', 0.7),
+                    max_tokens=leader_llm_config.get('max_tokens', 2000)
+                )
+            elif leader.llm_provider == 'anthropic':
+                from langchain_anthropic import ChatAnthropic
+                leader_llm = ChatAnthropic(
+                    model=leader_llm_config.get('model', 'claude-3-sonnet-20240229'),
+                    api_key=leader_llm_config.get('api_key'),
+                    temperature=leader_llm_config.get('temperature', 0.7),
+                    max_tokens=leader_llm_config.get('max_tokens', 2000)
+                )
+            else:
+                raise ValueError(f'Unsupported LLM provider for Dynamic Team: {leader.llm_provider}')
+            
+            # メンバーのLLMインスタンスとツールを作成
+            member_llms = {}
+            member_configs = {}
+            member_tools = {}
+            for member in members:
+                member_llm_config = self._get_llm_config(member)
+                
+                if member.llm_provider == 'openai':
+                    from langchain_openai import ChatOpenAI
+                    member_llms[member.id] = ChatOpenAI(
+                        model=member_llm_config.get('model', 'gpt-4'),
+                        api_key=member_llm_config.get('api_key'),
+                        base_url=member_llm_config.get('base_url'),
+                        temperature=member_llm_config.get('temperature', 0.7),
+                        max_tokens=member_llm_config.get('max_tokens', 2000)
+                    )
+                elif member.llm_provider == 'anthropic':
+                    from langchain_anthropic import ChatAnthropic
+                    member_llms[member.id] = ChatAnthropic(
+                        model=member_llm_config.get('model', 'claude-3-sonnet-20240229'),
+                        api_key=member_llm_config.get('api_key'),
+                        temperature=member_llm_config.get('temperature', 0.7),
+                        max_tokens=member_llm_config.get('max_tokens', 2000)
+                    )
+                else:
+                    raise ValueError(f'Unsupported LLM provider for Dynamic Team member: {member.llm_provider}')
+                
+                member_configs[member.id] = {
+                    'name': member.name,
+                    'role': member.role,
+                    'description': member.description
+                }
+                
+                # 各メンバーのツールを取得
+                member_tools[member.id] = self._get_available_tools(member, task)
+            
+            # リーダーのツールを取得
+            leader_tools = self._get_available_tools(leader, task)
+            
+            # DynamicTeamAgentを作成
+            team_agent = DynamicTeamAgent(
+                leader_llm=leader_llm,
+                member_llms=member_llms,
+                leader_agent_config={
+                    'name': leader.name,
+                    'role': leader.role,
+                    'description': leader.description
+                },
+                member_agent_configs=member_configs,
+                leader_tools=leader_tools,
+                member_tools=member_tools,
+                task_id=task.id,
+                checkpointer=checkpointer
+            )
+            
+            # タスクを実行
+            print("Starting dynamic team task execution:")
+            print(f"  - Task ID: {task.id}")
+            print(f"  - Description: {task.description}")
+            print(f"  - Leader: {leader.name}")
+            
+            # 実行前にキャンセルチェック
+            db.session.refresh(task)
+            if task.status == 'cancelled':
+                print(f"Task {task.id} was cancelled before execution")
+                raise Exception("Task was cancelled")
+            
+            # ストリーミング実行でログ記録
+            final_state = None
+            print("Starting stream_execute loop...")
+            step_count = 0
+            for step in team_agent.stream_execute(task.description):
+                step_count += 1
+                print(f"Stream step {step_count}: {list(step.keys()) if step else 'empty'}")
+                
+                # ステップをログ記録
+                node_name = list(step.keys())[0] if step else 'unknown'
+                node_data = step.get(node_name, {})
+                final_state = node_data  # 最後のステップを保存
+                
+                print(f"Node: {node_name}, has messages: {'messages' in node_data}")
+                
+                if 'messages' in node_data:
+                    messages = node_data['messages']
+                    if messages:
+                        last_message = messages[-1]
+                        content = getattr(last_message, 'content', str(last_message))
+                        print(f"Logging interaction: [{node_name}] {content[:100]}...")
+                        self._log_interaction(
+                            task_id=task.id,
+                            interaction_type='info',
+                            content=f"[{node_name}] {content}",
+                            metadata={'node': node_name}
+                        )
+                
+                # キャンセルチェック
+                db.session.refresh(task)
+                if task.status == 'cancelled':
+                    print(f"Task {task.id} was cancelled during execution")
+                    raise Exception("Task was cancelled")
+            
+            print(f"Stream execute completed. Total steps: {step_count}")
+            
+            # 最終結果を取得（stream_executeの最後のステートから）
+            # messagesをJSON化可能な形式に変換
+            messages = final_state.get('messages', []) if final_state else []
+            serializable_messages = []
+            for msg in messages:
+                if hasattr(msg, 'content'):
+                    serializable_messages.append({
+                        'type': msg.__class__.__name__,
+                        'content': msg.content
+                    })
+                else:
+                    serializable_messages.append(str(msg))
+            
+            result = {
+                'success': True,
+                'result': final_state.get('final_result', '') if final_state else '',
+                'messages': serializable_messages,
+                'leader_plan': final_state.get('leader_plan', '') if final_state else '',
+                'member_results': final_state.get('member_results', {}) if final_state else {}
+            }
+            
+            print("Dynamic team task execution completed:")
+            print(f"  - Result: {result}")
+            
+            # 成功時の処理
+            self._log_interaction(
+                task_id=task.id,
+                interaction_type='result',
+                content='タスクが正常に完了しました（Dynamic Team Pattern）'
+            )
+            
+            task.status = 'completed'
+            task.completed_at = datetime.utcnow()
+            task.result = result
+            leader.status = 'idle'
+            
+            # 成功ログ
+            execution_time = (task.completed_at - task.started_at).total_seconds()
+            self._log_action(
+                task.id,
+                leader.id,
+                'dynamic_team_task_completed',
+                'completed',
+                output_data=result,
+                execution_time=execution_time
+            )
+            
+            db.session.commit()
+            
+            # WebSocketでタスク完了イベントを送信（エラーが発生してもタスクステータスには影響させない）
+            try:
+                emit_task_completed(task.id, result)
+            except Exception as ws_error:
+                print(f"WebSocket emit error (task completed): {ws_error}")
+            
+            return {'success': True, 'result': result}
+        
+        except Exception as e:
+            # キャンセルされた場合の処理
+            if "cancelled" in str(e).lower() or task.status == 'cancelled':
+                print(f"Dynamic team task {task.id} was cancelled")
+                
+                if task.status != 'cancelled':
+                    task.status = 'cancelled'
+                
+                task.completed_at = datetime.utcnow()
+                task.error_message = 'Task was cancelled by user'
+                
+                if task.leader_agent_id:
+                    leader = Agent.query.get(task.leader_agent_id)
+                    if leader:
+                        leader.status = 'idle'
+                
+                self._log_interaction(
+                    task_id=task.id,
+                    interaction_type='info',
+                    content='タスクがキャンセルされました（Dynamic Team Pattern）'
+                )
+                
+                self._log_action(
+                    task.id,
+                    task.leader_agent_id,
+                    'dynamic_team_task_cancelled',
+                    'failed',
+                    error_message='Task cancelled by user'
+                )
+                
+                db.session.commit()
+                emit_task_failed(task.id, 'Task cancelled by user')
+                
+                return {'success': False, 'error': 'Task cancelled by user'}
+            
+            # その他のエラー処理
+            task.status = 'failed'
+            task.completed_at = datetime.utcnow()
+            task.error_message = str(e)
+            
+            if task.leader_agent_id:
+                leader = Agent.query.get(task.leader_agent_id)
+                if leader:
+                    leader.status = 'idle'
+            
+            self._log_action(
+                task.id,
+                task.leader_agent_id,
+                'dynamic_team_task_failed',
+                'failed',
+                error_message=str(e)
+            )
+            
+            db.session.commit()
+            emit_task_failed(task.id, str(e))
+            
+            raise

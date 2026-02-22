@@ -63,7 +63,9 @@ def create_agent():
             llm_model=data['llm_model'],
             llm_config=data.get('llm_config', {}),
             personality=data.get('personality'),
-            tool_names=data.get('tool_names')
+            tool_names=data.get('tool_names'),
+            agent_type=data.get('agent_type', 'worker'),
+            supervisor_id=data.get('supervisor_id')
         )
         
         return jsonify({
@@ -83,13 +85,23 @@ def create_agent():
 def update_agent(agent_id):
     """エージェントを更新"""
     try:
+        import json
         agent = Agent.query.get_or_404(agent_id)
         data = request.get_json()
+        
+        # tool_namesを配列からJSON文字列に変換
+        if 'tool_names' in data:
+            tool_names = data['tool_names']
+            if tool_names is None:
+                data['tool_names'] = json.dumps([])
+            elif isinstance(tool_names, list):
+                data['tool_names'] = json.dumps(tool_names)
+            # 既にJSON文字列の場合はそのまま
         
         # 更新可能なフィールド
         updatable_fields = ['name', 'role', 'description', 'llm_provider',
                             'llm_model', 'llm_config', 'personality', 'status',
-                            'tool_names']
+                            'tool_names', 'agent_type', 'supervisor_id']
         
         for field in updatable_fields:
             if field in data:
@@ -170,6 +182,122 @@ def get_agent_tools(agent_id):
         return jsonify({
             'success': True,
             'data': tools
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@agents_bp.route('/<int:supervisor_id>/workers', methods=['GET'])
+def get_supervisor_workers(supervisor_id):
+    """Supervisorのワーカーエージェント一覧を取得"""
+    try:
+        workers = agent_service.get_workers(supervisor_id)
+        
+        return jsonify({
+            'success': True,
+            'data': [worker.to_dict() for worker in workers]
+        }), 200
+        
+    except ValueError as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 400
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@agents_bp.route('/<int:worker_id>/assign-supervisor', methods=['POST'])
+def assign_supervisor(worker_id):
+    """ワーカーエージェントにSupervisorを割り当て"""
+    try:
+        data = request.get_json()
+        supervisor_id = data.get('supervisor_id')
+        
+        if not supervisor_id:
+            return jsonify({
+                'success': False,
+                'error': 'supervisor_id is required'
+            }), 400
+        
+        worker = agent_service.assign_supervisor(worker_id, supervisor_id)
+        
+        return jsonify({
+            'success': True,
+            'data': worker.to_dict(),
+            'message': 'Supervisor assigned successfully'
+        }), 200
+        
+    except ValueError as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 400
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@agents_bp.route('/<int:worker_id>/remove-supervisor', methods=['POST'])
+def remove_supervisor(worker_id):
+    """ワーカーエージェントからSupervisorを解除"""
+    try:
+        worker = agent_service.remove_supervisor(worker_id)
+        
+        return jsonify({
+            'success': True,
+            'data': worker.to_dict(),
+            'message': 'Supervisor removed successfully'
+        }), 200
+        
+    except ValueError as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 400
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@agents_bp.route('/supervisors', methods=['GET'])
+def get_supervisors():
+    """Supervisorエージェント一覧を取得"""
+    try:
+        supervisors = agent_service.list_agents(agent_type='supervisor')
+        
+        return jsonify({
+            'success': True,
+            'data': [supervisor.to_dict() for supervisor in supervisors]
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@agents_bp.route('/workers', methods=['GET'])
+def get_workers():
+    """Workerエージェント一覧を取得"""
+    try:
+        workers = agent_service.list_agents(agent_type='worker')
+        
+        return jsonify({
+            'success': True,
+            'data': [worker.to_dict() for worker in workers]
         }), 200
         
     except Exception as e:

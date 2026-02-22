@@ -28,7 +28,7 @@ def get_tasks():
             from datetime import datetime
             try:
                 since_dt = datetime.fromisoformat(updated_since.replace('Z', '+00:00'))
-                query = query.filter(Task.updated_at > since_dt)
+                query = query.filter(Task.updated_at >= since_dt)
             except ValueError:
                 pass  # 無効な日時形式の場合は無視
         
@@ -84,9 +84,11 @@ def create_task():
             description=data['description'],
             priority=data.get('priority', 'medium'),
             assigned_to=data.get('assigned_to'),
-            mode=data.get('mode', 'manual'),
+            mode=data.get('mode', 'single'),
             deadline=data.get('deadline'),
-            additional_tool_names=data.get('additional_tool_names')
+            additional_tool_names=data.get('additional_tool_names'),
+            team_member_ids=data.get('team_member_ids'),
+            leader_agent_id=data.get('leader_agent_id')
         )
         
         return jsonify({
@@ -112,7 +114,8 @@ def update_task(task_id):
         # 更新可能なフィールド
         updatable_fields = ['title', 'description', 'priority', 'status',
                             'assigned_to', 'deadline', 'result',
-                            'error_message', 'additional_tool_names']
+                            'error_message', 'additional_tool_names',
+                            'team_member_ids', 'leader_agent_id']
         
         for field in updatable_fields:
             if field in data:
@@ -140,13 +143,20 @@ def delete_task(task_id):
     try:
         task = Task.query.get_or_404(task_id)
         
-        # 実行中のタスクは削除できない
-        # pending, completed, failed, cancelled は削除可能
-        if task.status == 'running':
+        # 強制削除フラグをチェック
+        force = request.args.get('force', 'false').lower() == 'true'
+        
+        # 実行中のタスクは通常削除できないが、forceフラグがあれば削除可能
+        if task.status == 'running' and not force:
             return jsonify({
                 'success': False,
-                'error': 'Cannot delete running task. Please cancel it first.'
+                'error': 'Cannot delete running task. Use force=true to delete anyway.'
             }), 400
+        
+        # 実行中のタスクを強制削除する場合、まずキャンセル状態に変更
+        if task.status == 'running' and force:
+            task.status = 'cancelled'
+            db.session.commit()
         
         db.session.delete(task)
         db.session.commit()
@@ -249,12 +259,14 @@ def cancel_task(task_id):
     try:
         task = Task.query.get_or_404(task_id)
         
-        if task.status != 'running':
+        # 既にキャンセル済み、完了済み、失敗済みの場合はエラー
+        if task.status in ['cancelled', 'completed', 'failed']:
             return jsonify({
                 'success': False,
-                'error': 'Task is not running'
+                'error': f'Task is already {task.status}'
             }), 400
         
+        # pending, running, またはその他の状態（入力待ちなど）はキャンセル可能
         task.status = 'cancelled'
         db.session.commit()
         

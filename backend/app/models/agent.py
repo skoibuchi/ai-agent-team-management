@@ -1,4 +1,5 @@
 from datetime import datetime
+import json
 from app import db
 
 
@@ -21,26 +22,45 @@ class Agent(db.Model):
     personality = db.Column(db.JSON)
     
     # ツール設定
-    tool_names = db.Column(db.JSON)  # エージェントが使用できるツール名のリスト ['calculator', 'web_search']
+    tool_names = db.Column(db.Text)  # エージェントが使用できるツール名のリスト（JSON文字列）
     
     # ステータス
     status = db.Column(db.String(20), default='idle')  # idle, running, error
+    
+    # Supervisor Pattern用フィールド
+    agent_type = db.Column(db.String(20), nullable=False, default='worker')  # supervisor, worker
+    supervisor_id = db.Column(db.Integer, db.ForeignKey('agents.id'), nullable=True)  # 所属するSupervisor
     
     # タイムスタンプ
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # リレーションシップ
-    tasks = db.relationship('Task', back_populates='agent', lazy='dynamic')
+    tasks = db.relationship('Task', foreign_keys='Task.assigned_to', back_populates='agent', lazy='dynamic')
     execution_logs = db.relationship('ExecutionLog', back_populates='agent', lazy='dynamic')
     tools = db.relationship('Tool', secondary='agent_tools', back_populates='agents')
+    
+    # Supervisor Pattern用リレーションシップ
+    supervisor = db.relationship('Agent', remote_side=[id], backref='workers', foreign_keys=[supervisor_id])
+    
+    @property
+    def tool_names_list(self):
+        """tool_namesをリストとして取得"""
+        if not self.tool_names:
+            return []
+        if isinstance(self.tool_names, list):
+            return self.tool_names
+        try:
+            return json.loads(self.tool_names) if self.tool_names else []
+        except (json.JSONDecodeError, TypeError):
+            return []
     
     def __repr__(self):
         return f'<Agent {self.name}>'
     
     def to_dict(self):
         """辞書形式に変換"""
-        return {
+        data = {
             'id': self.id,
             'name': self.name,
             'role': self.role,
@@ -49,13 +69,28 @@ class Agent(db.Model):
             'llm_model': self.llm_model,
             'llm_config': self.llm_config,
             'personality': self.personality,
-            'tool_names': self.tool_names or [],
+            'tool_names': self.tool_names_list,
+            'agent_type': self.agent_type,
+            'supervisor_id': self.supervisor_id,
             'status': self.status,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
             'tasks_count': self.tasks.count(),
-            'tools_count': len(self.tools)
+            'tools_count': len(self.tool_names_list)
         }
+        
+        # Supervisorの場合、ワーカー数を追加
+        if self.agent_type == 'supervisor':
+            data['workers_count'] = len(self.workers)
+        
+        # Workerの場合、Supervisor情報を追加
+        if self.supervisor:
+            data['supervisor'] = {
+                'id': self.supervisor.id,
+                'name': self.supervisor.name
+            }
+        
+        return data
     
     def get_statistics(self):
         """統計情報を取得"""

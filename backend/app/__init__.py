@@ -55,15 +55,39 @@ def create_app(config_name=None):
     
     # データベースの初期化
     with app.app_context():
+        # モデルをインポート（db.create_all()の直前）
+        from app.models import agent, task, team, tool, execution_log, llm_setting, tool_approval, task_interaction  # noqa: F401
         db.create_all()
     
+    # エラーハンドラーの登録
+    register_error_handlers(app)
+    
     return app
+
+
+def register_error_handlers(app):
+    """エラーハンドラーの登録"""
+    import traceback
+    from flask import jsonify
+    
+    @app.errorhandler(Exception)
+    def handle_exception(e):
+        """全ての例外をキャッチして詳細を出力"""
+        app.logger.error(f"Unhandled exception: {str(e)}")
+        app.logger.error(traceback.format_exc())
+        
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        }), 500
 
 
 def register_blueprints(app):
     """Blueprintの登録"""
     from app.api.agents import agents_bp
     from app.api.tasks import tasks_bp
+    from app.api.teams import teams_bp
     from app.api.tools import tools_bp
     from app.api.settings import settings_bp
     from app.api.task_analysis import task_analysis_bp
@@ -72,6 +96,7 @@ def register_blueprints(app):
     
     app.register_blueprint(agents_bp, url_prefix='/api/agents')
     app.register_blueprint(tasks_bp, url_prefix='/api/tasks')
+    app.register_blueprint(teams_bp, url_prefix='/api/teams')
     app.register_blueprint(tools_bp, url_prefix='/api/tools')
     app.register_blueprint(settings_bp, url_prefix='/api/settings')
     app.register_blueprint(task_analysis_bp, url_prefix='/api/task-analysis')

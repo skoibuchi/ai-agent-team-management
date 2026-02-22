@@ -1,8 +1,29 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, current_app
 from app import db
 from app.models import LLMSetting
+import os
 
 settings_bp = Blueprint('settings', __name__)
+
+
+@settings_bp.route('/debug', methods=['GET'])
+def debug_config():
+    """デバッグ用：現在の設定を確認"""
+    try:
+        return jsonify({
+            'success': True,
+            'data': {
+                'database_uri': current_app.config.get('SQLALCHEMY_DATABASE_URI'),
+                'database_exists': os.path.exists(current_app.config.get('SQLALCHEMY_DATABASE_URI', '').replace('sqlite:///', '')),
+                'cwd': os.getcwd(),
+                'app_root': current_app.root_path
+            }
+        }), 200
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
 
 
 @settings_bp.route('/llm', methods=['GET'])

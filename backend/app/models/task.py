@@ -1,4 +1,5 @@
 from datetime import datetime
+import json
 from app import db
 
 
@@ -16,7 +17,7 @@ class Task(db.Model):
     deadline = db.Column(db.DateTime)
     
     # ステータス
-    status = db.Column(db.String(20), default='pending')  # pending, running, completed, failed
+    status = db.Column(db.String(20), default='pending')  # pending, running, completed, failed, cancelled
     
     # 割り当て
     assigned_to = db.Column(db.Integer, db.ForeignKey('agents.id'))
@@ -25,13 +26,17 @@ class Task(db.Model):
     parent_task_id = db.Column(db.Integer, db.ForeignKey('tasks.id'))
     
     # 実行モード
-    mode = db.Column(db.String(20), default='manual')  # manual, auto, team
+    mode = db.Column(db.String(20), default='single')  # single, auto, team
     
     # 自動実行モード（実行中に切り替え可能）
     auto_mode = db.Column(db.Boolean, default=False)  # False=対話モード, True=自動モード
     
     # ツール設定
     additional_tool_names = db.Column(db.JSON)  # タスク固有の追加ツール名のリスト ['file_reader', 'data_analyzer']
+    
+    # 動的チーム編成（Dynamic Team Pattern用）
+    team_member_ids = db.Column(db.JSON)  # チームメンバーのエージェントIDリスト [1, 2, 3]
+    leader_agent_id = db.Column(db.Integer, db.ForeignKey('agents.id'))  # チームリーダーのエージェントID
     
     # 結果
     result = db.Column(db.JSON)
@@ -43,8 +48,33 @@ class Task(db.Model):
     started_at = db.Column(db.DateTime)
     completed_at = db.Column(db.DateTime)
     
+    @property
+    def additional_tool_names_list(self):
+        """additional_tool_namesをリストとして取得"""
+        if not self.additional_tool_names:
+            return []
+        if isinstance(self.additional_tool_names, list):
+            return self.additional_tool_names
+        try:
+            return json.loads(self.additional_tool_names) if isinstance(self.additional_tool_names, str) else []
+        except (json.JSONDecodeError, TypeError):
+            return []
+    
+    @property
+    def team_member_ids_list(self):
+        """team_member_idsをリストとして取得"""
+        if not self.team_member_ids:
+            return []
+        if isinstance(self.team_member_ids, list):
+            return self.team_member_ids
+        try:
+            return json.loads(self.team_member_ids) if isinstance(self.team_member_ids, str) else []
+        except (json.JSONDecodeError, TypeError):
+            return []
+    
     # リレーションシップ
-    agent = db.relationship('Agent', back_populates='tasks')
+    agent = db.relationship('Agent', foreign_keys=[assigned_to], back_populates='tasks')
+    leader_agent = db.relationship('Agent', foreign_keys=[leader_agent_id])
     parent_task = db.relationship('Task', remote_side=[id], backref=db.backref('subtasks', cascade='all, delete-orphan'))
     execution_logs = db.relationship('ExecutionLog', back_populates='task', lazy='dynamic', cascade='all, delete-orphan')
     
@@ -65,6 +95,8 @@ class Task(db.Model):
             'mode': self.mode,
             'auto_mode': self.auto_mode,
             'additional_tool_names': self.additional_tool_names or [],
+            'team_member_ids': self.team_member_ids or [],
+            'leader_agent_id': self.leader_agent_id,
             'result': self.result,
             'error_message': self.error_message,
             'deadline': self.deadline.isoformat() if self.deadline else None,
@@ -117,9 +149,13 @@ class Task(db.Model):
                 - 'completed': 完了
                 - 'failed': 失敗
         """
-        # 基本ステータスがpending, completed, failedの場合はそのまま返す
-        if self.status in ['pending', 'completed', 'failed']:
+        # 基本ステータスがpending, completed, failed, cancelledの場合はそのまま返す
+        if self.status in ['pending', 'completed', 'failed', 'cancelled']:
             return self.status
+        
+        # waiting_for_input状態の場合はそのまま返す
+        if self.status == 'waiting_for_input':
+            return 'waiting_input'
         
         # runningの場合、インタラクションの状態を確認
         if self.status == 'running':

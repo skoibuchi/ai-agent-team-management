@@ -10,10 +10,17 @@ export interface Agent {
   personality?: Record<string, any>
   tool_names?: string[]
   status: 'idle' | 'active' | 'running' | 'error'
+  agent_type: 'worker' | 'supervisor'
+  supervisor_id?: number
   created_at: string
   updated_at: string
   tasks_count: number
   tools_count: number
+  workers_count?: number  // Supervisorの場合のみ
+  supervisor?: {  // Workerの場合のみ
+    id: number
+    name: string
+  }
 }
 
 export interface AgentStatistics {
@@ -33,9 +40,11 @@ export interface Task {
   detailed_status?: 'pending' | 'running' | 'waiting_input' | 'waiting_approval' | 'completed' | 'failed' | 'cancelled'
   assigned_to?: number
   parent_task_id?: number
-  mode: 'manual' | 'auto' | 'team'
+  mode: 'single' | 'auto' | 'team'
   auto_mode?: boolean  // 自動実行モード（実行中に切り替え可能）
   additional_tool_names?: string[]
+  team_member_ids?: number[]  // Dynamic Team Pattern用
+  leader_agent_id?: number  // Dynamic Team Pattern用
   result?: Record<string, any>
   error_message?: string
   deadline?: string
@@ -50,6 +59,28 @@ export interface Task {
   }
   subtasks?: Task[]
 }
+// Team types
+export interface Team {
+  id: number
+  name: string
+  description?: string
+  leader_agent_id: number
+  member_ids: number[]
+  is_active: boolean
+  created_at: string
+  updated_at: string
+  leader_agent?: {
+    id: number
+    name: string
+    role?: string
+  }
+  members?: Array<{
+    id: number
+    name: string
+    role?: string
+  }>
+}
+
 
 // Tool types
 export interface Tool {

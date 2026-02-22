@@ -7,6 +7,7 @@ import { Toaster } from 'react-hot-toast'
 import Dashboard from './pages/Dashboard'
 import Agents from './pages/Agents'
 import Tasks from './pages/Tasks'
+import Teams from './pages/Teams'
 import Tools from './pages/Tools'
 import Settings from './pages/Settings'
 
@@ -35,6 +36,7 @@ function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/agents" element={<Agents />} />
             <Route path="/tasks" element={<Tasks />} />
+            <Route path="/teams" element={<Teams />} />
             <Route path="/tools" element={<Tools />} />
             <Route path="/settings" element={<Settings />} />
           </Routes>

@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { Agent, Task, Tool, LLMSetting, ExecutionLog, ApiResponse } from '@/types'
+import type { Agent, Task, Team, Tool, LLMSetting, ExecutionLog, ApiResponse } from '@/types'
 import type { TaskInteractionResponse, PendingInteractionsResponse, InteractionRespondRequest } from '@/types/interaction'
 
 const axiosInstance = axios.create({
@@ -18,6 +18,11 @@ export const agentApi = {
   delete: (id: number) => axiosInstance.delete<ApiResponse<void>>(`/agents/${id}`),
   getStatistics: (id: number) => axiosInstance.get<ApiResponse<any>>(`/agents/${id}/statistics`),
   getTools: (id: number) => axiosInstance.get<ApiResponse<Tool[]>>(`/agents/${id}/tools`),
+  getSupervisors: () => axiosInstance.get<ApiResponse<Agent[]>>('/agents/supervisors'),
+  getWorkers: () => axiosInstance.get<ApiResponse<Agent[]>>('/agents/workers'),
+  getWorkersBySupervisor: (id: number) => axiosInstance.get<ApiResponse<Agent[]>>(`/agents/${id}/workers`),
+  assignSupervisor: (id: number, supervisorId: number) => axiosInstance.post<ApiResponse<Agent>>(`/agents/${id}/assign-supervisor`, { supervisor_id: supervisorId }),
+  removeSupervisor: (id: number) => axiosInstance.post<ApiResponse<Agent>>(`/agents/${id}/remove-supervisor`),
 }
 
 // Task API
@@ -32,6 +37,16 @@ export const taskApi = {
   getLogs: (id: number) => axiosInstance.get<ApiResponse<ExecutionLog[]>>(`/tasks/${id}/logs`),
   cancel: (id: number) => axiosInstance.post<ApiResponse<Task>>(`/tasks/${id}/cancel`),
   toggleAutoMode: (id: number) => axiosInstance.post<ApiResponse<Task>>(`/tasks/${id}/toggle-auto-mode`),
+}
+
+// Team API
+export const teamApi = {
+  getAll: (params?: { is_active?: boolean }) =>
+    axiosInstance.get<ApiResponse<Team[]>>('/teams', { params }),
+  getById: (id: number) => axiosInstance.get<ApiResponse<Team>>(`/teams/${id}`),
+  create: (data: Partial<Team>) => axiosInstance.post<ApiResponse<Team>>('/teams', data),
+  update: (id: number, data: Partial<Team>) => axiosInstance.put<ApiResponse<Team>>(`/teams/${id}`, data),
+  delete: (id: number) => axiosInstance.delete<ApiResponse<void>>(`/teams/${id}`),
 }
 
 // Tool API
@@ -113,6 +128,11 @@ export const api = {
   deleteAgent: (id: number) => agentApi.delete(id).then(res => res.data),
   getAgentStatistics: (id: number) => agentApi.getStatistics(id).then(res => res.data),
   getAgentTools: (id: number) => agentApi.getTools(id).then(res => res.data),
+  getSupervisors: () => agentApi.getSupervisors().then(res => res.data),
+  getWorkers: () => agentApi.getWorkers().then(res => res.data),
+  getWorkersBySupervisor: (id: number) => agentApi.getWorkersBySupervisor(id).then(res => res.data),
+  assignSupervisor: (id: number, supervisorId: number) => agentApi.assignSupervisor(id, supervisorId).then(res => res.data),
+  removeSupervisor: (id: number) => agentApi.removeSupervisor(id).then(res => res.data),
 
   // Tasks
   getTasks: (params?: { status?: string; agent_id?: number; updated_since?: string }) => taskApi.getAll(params).then(res => res.data),

@@ -28,8 +28,8 @@ import {
 } from '@mui/material'
 import { Add, PlayArrow, Cancel, Delete, Assignment, Build, Search, Visibility } from '@mui/icons-material'
 import { useStore } from '@/store'
-import { api } from '@/services/api'
-import type { Task } from '@/types'
+import { api, teamApi } from '@/services/api'
+import type { Task, Team } from '@/types'
 import TaskExecutionDialog from '@/components/TaskExecutionDialog'
 
 // ポーリング間隔（ミリ秒）
@@ -39,12 +39,17 @@ export default function Tasks() {
   const { tasks, agents, loading, fetchTasks, fetchAgents, addTask, updateTask, removeTask } = useStore()
   const [openDialog, setOpenDialog] = useState(false)
   const [selectedTab, setSelectedTab] = useState(0)
+  const [teams, setTeams] = useState<Team[]>([])
   const [formData, setFormData] = useState({
     title: '',
     description: '',
     priority: 'medium' as 'low' | 'medium' | 'high',
     assigned_to: '',
-    mode: 'manual' as 'manual' | 'auto' | 'team',
+    mode: 'single' as 'single' | 'auto' | 'team',
+    team_member_ids: [] as number[],
+    leader_agent_id: '',
+    use_existing_team: false,
+    selected_team_id: '',
   })
   const [analyzingTask, setAnalyzingTask] = useState(false)
   const [recommendedTools, setRecommendedTools] = useState<any[]>([])
@@ -69,9 +74,21 @@ export default function Tasks() {
     fetchAgents()
     fetchLLMSettings()
     fetchAllTools()
+    fetchTeams()
     // 初回取得時に現在時刻を記録
     setLastUpdateTime(new Date().toISOString())
   }, [fetchTasks, fetchAgents])
+
+  const fetchTeams = async () => {
+    try {
+      const response = await teamApi.getAll({ is_active: true })
+      if (response.data.success) {
+        setTeams(response.data.data || [])
+      }
+    } catch (error) {
+      console.error('Failed to fetch teams:', error)
+    }
+  }
 
   // 差分取得のポーリング
   useEffect(() => {
@@ -90,18 +107,32 @@ export default function Tasks() {
     console.log('[Tasks] Starting polling for task updates')
 
     const fetchUpdatedTasks = async () => {
-      if (!lastUpdateTime) return
+      if (!lastUpdateTime) {
+        console.log('[Tasks] Skipping poll: lastUpdateTime not set')
+        return
+      }
 
       try {
+        console.log(`[Tasks] Polling with updated_since: ${lastUpdateTime}`)
         const response = await api.getTasks({ updated_since: lastUpdateTime })
+        console.log(`[Tasks] Poll response:`, response.data)
         if (response.data && response.data.length > 0) {
           console.log(`[Tasks] Received ${response.data.length} updated tasks`)
           // 更新されたタスクをマージ
+          let latestUpdatedAt = lastUpdateTime
           response.data.forEach(updatedTask => {
+            console.log(`[Tasks] Updating task ${updatedTask.id}, detailed_status: ${updatedTask.detailed_status}`)
             updateTask(updatedTask.id, updatedTask)
+            // 最新のupdated_atを追跡
+            if (updatedTask.updated_at > latestUpdatedAt) {
+              latestUpdatedAt = updatedTask.updated_at
+            }
           })
-          // 最終更新時刻を更新
-          setLastUpdateTime(new Date().toISOString())
+          // 取得したタスクの最新updated_atを次回のポーリング基準時刻として使用
+          setLastUpdateTime(latestUpdatedAt)
+          console.log(`[Tasks] Updated lastUpdateTime to: ${latestUpdatedAt}`)
+        } else {
+          console.log('[Tasks] No updated tasks received')
         }
       } catch (error) {
         console.error('Failed to fetch updated tasks:', error)
@@ -150,7 +181,11 @@ export default function Tasks() {
       description: '',
       priority: 'medium',
       assigned_to: '',
-      mode: 'manual',
+      mode: 'single',
+      team_member_ids: [],
+      leader_agent_id: '',
+      use_existing_team: false,
+      selected_team_id: '',
     })
     setRecommendedTools([])
     setSelectedTools([])
@@ -212,6 +247,16 @@ export default function Tasks() {
       
       if (formData.assigned_to) {
         taskData.assigned_to = parseInt(formData.assigned_to)
+      }
+
+      // チームモードの場合、チームメンバーとリーダーを設定
+      if (formData.mode === 'team') {
+        if (formData.team_member_ids.length > 0) {
+          taskData.team_member_ids = formData.team_member_ids
+        }
+        if (formData.leader_agent_id) {
+          taskData.leader_agent_id = parseInt(formData.leader_agent_id)
+        }
       }
 
       // 選択されたツールをadditional_tool_namesとして保存
@@ -484,7 +529,7 @@ export default function Tasks() {
                   </Box>
                 </Box>
 
-                {(task.status === 'running' || task.status === 'waiting_for_input') && (
+                {(task.status === 'running' || (task.detailed_status === 'waiting_input')) && (
                   <Box mb={2}>
                     <LinearProgress />
                   </Box>
@@ -498,14 +543,14 @@ export default function Tasks() {
                       </Typography>
                     )}
                     <Typography variant="caption" color="textSecondary" display="block">
-                      モード: {task.mode === 'manual' ? '手動' : task.mode === 'auto' ? '自動' : 'チーム'}
+                      モード: {task.mode === 'single' ? '個人' : task.mode === 'auto' ? '自動' : 'チーム'}
                     </Typography>
                     <Typography variant="caption" color="textSecondary" display="block">
                       作成: {new Date(task.created_at).toLocaleString('ja-JP')}
                     </Typography>
                   </Box>
                   <Box display="flex" gap={1}>
-                    {(task.status === 'running' || task.status === 'waiting_for_input' || task.status === 'completed' || task.status === 'failed') && (
+                    {(task.status === 'running' || (task.detailed_status === 'waiting_input') || task.status === 'completed' || task.status === 'failed') && (
                       <IconButton
                         size="small"
                         color="info"
@@ -539,7 +584,7 @@ export default function Tasks() {
                         </IconButton>
                       </>
                     )}
-                    {(task.status === 'running' || task.status === 'waiting_for_input') && (
+                    {(task.status === 'running' || (task.detailed_status === 'waiting_input')) && (
                       <IconButton
                         size="small"
                         color="warning"
@@ -620,11 +665,11 @@ export default function Tasks() {
               select
               fullWidth
             >
-              <MenuItem value="manual">手動 - エージェントを指定</MenuItem>
+              <MenuItem value="single">個人 - エージェントを指定</MenuItem>
               <MenuItem value="auto">自動 - システムが選択</MenuItem>
               <MenuItem value="team">チーム - 複数エージェント</MenuItem>
             </TextField>
-            {formData.mode === 'manual' && (
+            {formData.mode === 'single' && (
               <TextField
                 label="担当エージェント"
                 value={formData.assigned_to}
@@ -639,6 +684,130 @@ export default function Tasks() {
                   </MenuItem>
                 ))}
               </TextField>
+            )}
+
+            {formData.mode === 'team' && (
+              <>
+                <Box sx={{ mb: 2 }}>
+                  <Typography variant="subtitle2" gutterBottom>
+                    チーム構成方法
+                  </Typography>
+                  <Box sx={{ display: 'flex', gap: 1 }}>
+                    <Button
+                      variant={!formData.use_existing_team ? 'contained' : 'outlined'}
+                      onClick={() => setFormData({ ...formData, use_existing_team: false, selected_team_id: '' })}
+                      fullWidth
+                    >
+                      アドホックチーム
+                    </Button>
+                    <Button
+                      variant={formData.use_existing_team ? 'contained' : 'outlined'}
+                      onClick={() => setFormData({ ...formData, use_existing_team: true })}
+                      fullWidth
+                    >
+                      既存チーム
+                    </Button>
+                  </Box>
+                </Box>
+
+                {formData.use_existing_team ? (
+                  <TextField
+                    label="チームを選択"
+                    value={formData.selected_team_id}
+                    onChange={(e) => {
+                      const teamId = e.target.value
+                      const selectedTeam = teams.find(t => t.id.toString() === teamId)
+                      if (selectedTeam) {
+                        setFormData({
+                          ...formData,
+                          selected_team_id: teamId,
+                          leader_agent_id: selectedTeam.leader_agent_id.toString(),
+                          team_member_ids: selectedTeam.member_ids || [],
+                        })
+                      } else {
+                        setFormData({
+                          ...formData,
+                          selected_team_id: teamId,
+                        })
+                      }
+                    }}
+                    select
+                    fullWidth
+                    required
+                    helperText="事前に定義されたチームを選択します"
+                  >
+                    <MenuItem value="">選択してください</MenuItem>
+                    {teams.map((team) => (
+                      <MenuItem key={team.id} value={team.id.toString()}>
+                        {team.name} (リーダー: {team.leader_agent?.name || `Agent #${team.leader_agent_id}`}, メンバー: {team.member_ids?.length || 0}人)
+                      </MenuItem>
+                    ))}
+                  </TextField>
+                ) : (
+                  <>
+                    <TextField
+                      label="チームリーダー"
+                      value={formData.leader_agent_id}
+                      onChange={(e) => setFormData({ ...formData, leader_agent_id: e.target.value })}
+                      select
+                      fullWidth
+                      required
+                      helperText="タスクを統括するリーダーエージェントを選択"
+                    >
+                      <MenuItem value="">選択してください</MenuItem>
+                      {agents.map((agent) => (
+                        <MenuItem key={agent.id} value={agent.id.toString()}>
+                          {agent.name} ({agent.role || '役割なし'})
+                        </MenuItem>
+                      ))}
+                    </TextField>
+
+                    <Box>
+                      <Typography variant="subtitle2" gutterBottom>
+                        チームメンバー
+                      </Typography>
+                      <Typography variant="caption" color="textSecondary" display="block" sx={{ mb: 1 }}>
+                        タスクを分担して実行するメンバーを選択（複数選択可）
+                      </Typography>
+                      <List dense sx={{ border: '1px solid #e0e0e0', borderRadius: 1, maxHeight: 200, overflow: 'auto' }}>
+                        {agents.map((agent) => (
+                          <ListItem
+                            key={agent.id}
+                            button
+                            onClick={() => {
+                              const memberId = agent.id
+                              setFormData(prev => ({
+                                ...prev,
+                                team_member_ids: prev.team_member_ids.includes(memberId)
+                                  ? prev.team_member_ids.filter(id => id !== memberId)
+                                  : [...prev.team_member_ids, memberId]
+                              }))
+                            }}
+                          >
+                            <ListItemIcon>
+                              <Checkbox
+                                edge="start"
+                                checked={formData.team_member_ids.includes(agent.id)}
+                                tabIndex={-1}
+                                disableRipple
+                              />
+                            </ListItemIcon>
+                            <ListItemText
+                              primary={agent.name}
+                              secondary={agent.role || '役割なし'}
+                            />
+                          </ListItem>
+                        ))}
+                      </List>
+                      {formData.team_member_ids.length > 0 && (
+                        <Typography variant="caption" color="primary" sx={{ mt: 1, display: 'block' }}>
+                          {formData.team_member_ids.length}人のメンバーを選択中
+                        </Typography>
+                      )}
+                    </Box>
+                  </>
+                )}
+              </>
             )}
 
             {/* Task Analysis Section */}
@@ -851,7 +1020,7 @@ export default function Tasks() {
       {/* タスク実行ログダイアログ */}
       <TaskExecutionDialog
         open={executionDialogOpen}
-        task={selectedTaskForExecution}
+        taskId={selectedTaskForExecution?.id || null}
         onClose={() => {
           setExecutionDialogOpen(false)
           setSelectedTaskForExecution(null)

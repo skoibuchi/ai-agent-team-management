@@ -8,7 +8,6 @@ from pydantic import BaseModel, Field
 from app import db
 from app.models import TaskInteraction
 from datetime import datetime
-import time
 
 
 class HumanInputSchema(BaseModel):
@@ -52,7 +51,7 @@ class HumanInputTool(BaseTool):
     
     def _run(self, question: str) -> str:
         """
-        ユーザーに質問して応答を待つ
+        ユーザーに質問して応答を待つ（ポーリング方式）
         
         Args:
             question: ユーザーに尋ねる質問
@@ -87,7 +86,7 @@ class HumanInputTool(BaseTool):
             
             return skip_message
         
-        # TaskInteractionを作成（質問）
+        # 質問を作成
         interaction = TaskInteraction(
             task_id=self.task_id,
             interaction_type='question',
@@ -99,27 +98,27 @@ class HumanInputTool(BaseTool):
         db.session.add(interaction)
         db.session.commit()
         
-        # WebSocketで通知（ExecutionServiceの_log_interactionが自動で行う）
+        # WebSocketで通知
         from app.websocket.events import emit_task_interaction_new
         try:
             emit_task_interaction_new(self.task_id, interaction)
         except Exception as e:
             print(f"WebSocket emit error: {e}")
         
-        # ユーザーの応答を待つ（無限ループ、タイムアウトなし）
+        # ユーザーの応答を待つ（ポーリング）
+        import time
         print(f"Waiting for user response to question: {question}")
+        
         while True:
-            # タスクのキャンセル状態をチェック
-            from app.models import Task
-            task = Task.query.get(self.task_id)
-            if task and task.status == 'cancelled':
+            # キャンセルチェック
+            db.session.refresh(task)
+            if task.status == 'cancelled':
                 print(f"Task {self.task_id} was cancelled while waiting for user input")
-                raise Exception(f"タスクがキャンセルされました。質問「{question}」への応答待ちを中断します。")
+                raise Exception("Task was cancelled")
             
-            # データベースから応答をチェック
+            # 応答をチェック
             db.session.refresh(interaction)
             if interaction.response:
-                # 応答を受信
                 print(f"Received user response: {interaction.response}")
                 
                 # ユーザー応答インタラクションを記録
@@ -136,7 +135,7 @@ class HumanInputTool(BaseTool):
                 
                 return interaction.response
             
-            # 1秒待機してから再チェック
+            # 1秒待機
             time.sleep(1)
     
     async def _arun(self, question: str) -> str:

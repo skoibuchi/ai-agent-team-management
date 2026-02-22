@@ -1,6 +1,6 @@
 import { ReactNode, useEffect, useState } from 'react'
 import { Box, AppBar, Toolbar, Typography, IconButton, Drawer, List, ListItem, ListItemButton, ListItemIcon, ListItemText, Badge } from '@mui/material'
-import { Menu as MenuIcon, Dashboard as DashboardIcon, SmartToy as AgentIcon, Assignment as TaskIcon, Build as ToolIcon, Settings as SettingsIcon, Notifications as NotificationsIcon } from '@mui/icons-material'
+import { Menu as MenuIcon, Dashboard as DashboardIcon, SmartToy as AgentIcon, Assignment as TaskIcon, Group as GroupIcon, Build as ToolIcon, Settings as SettingsIcon, Notifications as NotificationsIcon } from '@mui/icons-material'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { useStore } from '@/store'
 import { api } from '@/services/api'
@@ -16,6 +16,7 @@ const menuItems = [
   { text: 'ダッシュボード', icon: <DashboardIcon />, path: '/' },
   { text: 'エージェント', icon: <AgentIcon />, path: '/agents' },
   { text: 'タスク', icon: <TaskIcon />, path: '/tasks' },
+  { text: 'チーム', icon: <GroupIcon />, path: '/teams' },
   { text: 'ツール', icon: <ToolIcon />, path: '/tools' },
   { text: '設定', icon: <SettingsIcon />, path: '/settings' },
 ]

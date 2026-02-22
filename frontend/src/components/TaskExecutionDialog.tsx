@@ -29,11 +29,12 @@ import {
 import { Task } from '../types'
 import { TaskInteraction, InteractionType } from '../types/interaction'
 import api from '../services/api'
+import { useStore } from '../store'
 // import websocketService from '../services/websocket'
 
 interface TaskExecutionDialogProps {
   open: boolean
-  task: Task | null
+  taskId: number | null
   onClose: () => void
 }
 
@@ -172,7 +173,8 @@ const InteractionList = React.memo<{ interactions: TaskInteraction[] }>(({ inter
 
 InteractionList.displayName = 'InteractionList'
 
-const TaskExecutionDialog: React.FC<TaskExecutionDialogProps> = ({ open, task, onClose }) => {
+const TaskExecutionDialog: React.FC<TaskExecutionDialogProps> = ({ open, taskId, onClose }) => {
+  const { tasks } = useStore()
   const [interactions, setInteractions] = useState<TaskInteraction[]>([])
   const [loading, setLoading] = useState(false)
   const [responseText, setResponseText] = useState('')
@@ -181,6 +183,9 @@ const TaskExecutionDialog: React.FC<TaskExecutionDialogProps> = ({ open, task, o
   const scrollRef = useRef<HTMLDivElement>(null)
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true)
   const prevInteractionsLengthRef = useRef(0)
+
+  // taskIdから最新のタスク情報を取得
+  const task = taskId ? tasks.find(t => t.id === taskId) || null : null
 
   // モード切り替えハンドラー
   const handleToggleAutoMode = async () => {
@@ -262,18 +267,26 @@ const TaskExecutionDialog: React.FC<TaskExecutionDialogProps> = ({ open, task, o
 
   // 初回読み込み
   useEffect(() => {
-    if (!open || !task) {
+    if (!open || !taskId) {
       setInteractions([])
       return
     }
 
     fetchInteractions()
-  }, [open, task, fetchInteractions])
+  }, [open, taskId, fetchInteractions])
 
-  // ポーリング（タスク実行中または入力待ち中、3秒ごとに差分取得）
+  // ポーリング（タスク実行中、3秒ごとに差分取得）
+  // taskオブジェクトは常に最新の状態を参照するため、ステータス変更を自動検知
   useEffect(() => {
     if (!open || !task) return
-    if (task.status !== 'running' && task.status !== 'waiting_for_input') return
+    
+    // 実行中、入力待ち、保留中のいずれかの場合はポーリング継続
+    const detailedStatus = task.detailed_status || task.status
+    const shouldPoll = task.status === 'running' ||
+                       detailedStatus === 'waiting_input' ||
+                       task.status === 'pending'
+
+    if (!shouldPoll) return
 
     const interval = setInterval(() => {
       fetchNewInteractions()

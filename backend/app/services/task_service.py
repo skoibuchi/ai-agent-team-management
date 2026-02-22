@@ -7,8 +7,9 @@ class TaskService:
     """タスク管理サービス"""
     
     def create_task(self, title, description, priority='medium',
-                     assigned_to=None, mode='manual', deadline=None,
-                     additional_tool_names=None):
+                     assigned_to=None, mode='single', deadline=None,
+                     additional_tool_names=None, team_member_ids=None,
+                     leader_agent_id=None):
         """タスクを作成"""
         task = Task(
             title=title,
@@ -18,6 +19,8 @@ class TaskService:
             mode=mode,
             deadline=deadline,
             additional_tool_names=additional_tool_names or [],
+            team_member_ids=team_member_ids or [],
+            leader_agent_id=leader_agent_id,
             status='pending'
         )
         

@@ -5,7 +5,7 @@ from typing import Dict, Any, List
 import os
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.sqlite import SqliteSaver
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -204,6 +204,17 @@ human_inputツールを使わずに質問を返すことは、このシステム
             messages = result.get("messages", [])
             final_message = messages[-1] if messages else None
             
+            # ユーザー入力待ちマーカーをチェック
+            if final_message and isinstance(final_message.content, str):
+                if final_message.content.startswith("__WAITING_FOR_USER_INPUT__:"):
+                    # マーカーをパース: __WAITING_FOR_USER_INPUT__:interaction_id:question
+                    parts = final_message.content.split(":", 2)
+                    if len(parts) >= 3:
+                        interaction_id = int(parts[1])
+                        question = parts[2]
+                        from app.exceptions import HumanInputRequiredException
+                        raise HumanInputRequiredException(question=question, interaction_id=interaction_id)
+            
             return {
                 "success": True,
                 "result": final_message.content if final_message else "タスクを完了しました",
@@ -218,6 +229,11 @@ human_inputツールを使わずに質問を返すことは、このシステム
             }
             
         except Exception as e:
+            # HumanInputRequiredExceptionは再スロー（タスク一時停止のため）
+            from app.exceptions import HumanInputRequiredException
+            if isinstance(e, HumanInputRequiredException):
+                raise
+            
             return {
                 "success": False,
                 "error": f"タスクの実行に失敗しました: {str(e)}",
@@ -295,6 +311,11 @@ human_inputツールを使わずに質問を返すことは、このシステム
             print(f"[DEBUG] LLM type: {type(self.llm)}")
             
             event_count = 0
+            waiting_for_input = False
+            waiting_interaction_id = None
+            waiting_question = None
+            first_event = True
+            
             for event in self.agent.stream(
                 {"messages": [HumanMessage(content=enhanced_task)]},
                 config=config,
@@ -306,13 +327,34 @@ human_inputツールを使わずに質問を返すことは、このシステム
                 print(f"[DEBUG] Event has {len(messages)} total messages")
                 
                 if messages:
-                    # 新しいメッセージのみを処理
-                    new_messages = messages[len(all_messages):]
-                    print(f"[DEBUG] Processing {len(new_messages)} new messages")
+                    # 初回イベントの場合、既存の会話履歴をall_messagesに設定
+                    if first_event and len(messages) > 1:
+                        # 最後のメッセージ以外は既存の履歴
+                        all_messages = messages[:-1]
+                        new_messages = messages[-1:]
+                        print(f"[DEBUG] First event: Loaded {len(all_messages)} existing messages, processing {len(new_messages)} new messages")
+                        first_event = False
+                    else:
+                        # 新しいメッセージのみを処理
+                        new_messages = messages[len(all_messages):]
+                        print(f"[DEBUG] Processing {len(new_messages)} new messages")
+                        first_event = False
                     
                     for msg in new_messages:
                         msg_content = str(msg.content)
                         print(f"[DEBUG] New message - Type: {msg.type}, Content length: {len(msg_content)}")
+                        
+                        # ユーザー入力待ちマーカーをチェック（ToolMessageの場合）
+                        if msg.type == 'tool' and isinstance(msg_content, str):
+                            if msg_content.startswith("__WAITING_FOR_USER_INPUT__:"):
+                                # マーカーをパース
+                                parts = msg_content.split(":", 2)
+                                if len(parts) >= 3:
+                                    waiting_for_input = True
+                                    waiting_interaction_id = int(parts[1])
+                                    waiting_question = parts[2]
+                                    print("[DEBUG] Detected waiting marker, breaking stream loop")
+                                    break
                         
                         # ツール呼び出しをチェック
                         if hasattr(msg, 'tool_calls'):
@@ -336,11 +378,35 @@ human_inputツールを使わずに質問を返すことは、このシステム
                                 "message": msg
                             })
                     all_messages = messages
+                
+                # 内側のループでbreakした場合、外側のループも抜ける
+                if waiting_for_input:
+                    break
             
             print(f"[DEBUG] Agent.stream completed. Total events: {event_count}, Total messages: {len(all_messages)}")
             
+            # ユーザー入力待ちの場合、例外をスロー
+            if waiting_for_input and waiting_question and waiting_interaction_id is not None:
+                print("[DEBUG] Raising HumanInputRequiredException")
+                from app.exceptions import HumanInputRequiredException
+                raise HumanInputRequiredException(
+                    question=waiting_question,
+                    interaction_id=waiting_interaction_id
+                )
+            
             # 最終結果
             final_message = all_messages[-1] if all_messages else None
+            
+            # 念のため最終メッセージでもマーカーをチェック
+            if final_message and isinstance(final_message.content, str):
+                if final_message.content.startswith("__WAITING_FOR_USER_INPUT__:"):
+                    # マーカーをパース: __WAITING_FOR_USER_INPUT__:interaction_id:question
+                    parts = final_message.content.split(":", 2)
+                    if len(parts) >= 3:
+                        interaction_id = int(parts[1])
+                        question = parts[2]
+                        from app.exceptions import HumanInputRequiredException
+                        raise HumanInputRequiredException(question=question, interaction_id=interaction_id)
             
             return {
                 "success": True,
@@ -356,6 +422,11 @@ human_inputツールを使わずに質問を返すことは、このシステム
             }
             
         except Exception as e:
+            # HumanInputRequiredExceptionは再スロー（タスク一時停止のため）
+            from app.exceptions import HumanInputRequiredException
+            if isinstance(e, HumanInputRequiredException):
+                raise
+            
             return {
                 "success": False,
                 "error": f"タスクの実行に失敗しました: {str(e)}",
@@ -427,3 +498,52 @@ human_inputツールを使わずに質問を返すことは、このシステム
             self.checkpointer.put(config, {"messages": []})
         except Exception:
             pass
+
+    def add_user_response_to_state(
+        self,
+        thread_id: str,
+        tool_call_id: str,
+        response: str
+    ):
+        """
+        ユーザーの応答をLangGraphの状態に追加
+        
+        Args:
+            thread_id: スレッドID
+            tool_call_id: ツール呼び出しID
+            response: ユーザーの応答
+        """
+        if not self.enable_memory or not self.checkpointer:
+            print("[WARNING] Memory is not enabled, cannot add user response to state")
+            return
+        
+        try:
+            # 現在の状態を取得
+            config = {"configurable": {"thread_id": thread_id}}
+            current_state = self.agent.get_state(config)
+            
+            if not current_state or not current_state.values:
+                print(f"[WARNING] No state found for thread_id: {thread_id}")
+                return
+            
+            # ToolMessageを作成してユーザーの応答を追加
+            tool_message = ToolMessage(
+                content=response,
+                tool_call_id=tool_call_id
+            )
+            
+            # 状態を更新
+            self.agent.update_state(
+                config,
+                {"messages": [tool_message]}
+            )
+            
+            print(f"[INFO] Added user response to state for thread_id: {thread_id}")
+            print(f"[INFO] Tool call ID: {tool_call_id}")
+            print(f"[INFO] Response: {response}")
+            
+        except Exception as e:
+            print(f"[ERROR] Failed to add user response to state: {str(e)}")
+            import traceback
+            traceback.print_exc()
+    

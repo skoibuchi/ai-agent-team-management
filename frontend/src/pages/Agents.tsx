@@ -47,12 +47,16 @@ export default function Agents() {
     llm_provider: '',
     llm_model: '',
     tool_names: [] as string[],
+    agent_type: 'worker' as 'worker' | 'supervisor',
+    supervisor_id: undefined as number | undefined,
   })
+  const [availableSupervisors, setAvailableSupervisors] = useState<Agent[]>([])
 
   useEffect(() => {
     fetchAgents()
     fetchConfiguredProviders()
     fetchAvailableTools()
+    fetchAvailableSupervisors()
   }, [fetchAgents])
 
   // プロバイダーが変更されたらモデル一覧を取得
@@ -115,6 +119,18 @@ export default function Agents() {
     }
   }
 
+  const fetchAvailableSupervisors = async () => {
+    try {
+      const response = await api.getSupervisors()
+      if (response.success && response.data) {
+        setAvailableSupervisors(response.data)
+      }
+    } catch (error) {
+      console.error('Failed to fetch available supervisors:', error)
+      setAvailableSupervisors([])
+    }
+  }
+
   const handleToggleTool = (toolName: string) => {
     setFormData(prev => ({
       ...prev,
@@ -161,6 +177,8 @@ export default function Agents() {
         llm_provider: agent.llm_provider,
         llm_model: agent.llm_model,
         tool_names: agent.tool_names || [],
+        agent_type: agent.agent_type || 'worker',
+        supervisor_id: agent.supervisor_id,
       })
     } else {
       setEditingAgent(null)
@@ -172,6 +190,8 @@ export default function Agents() {
         llm_provider: defaultProvider,
         llm_model: '',
         tool_names: ['human_input'], // デフォルトでhuman_inputツールを選択
+        agent_type: 'worker',
+        supervisor_id: undefined,
       })
     }
     setOpenDialog(true)
@@ -290,9 +310,17 @@ export default function Agents() {
               <Card>
                 <CardContent>
                   <Box display="flex" justifyContent="space-between" alignItems="start" mb={2}>
-                    <Typography variant="h6" component="div">
-                      {agent.name}
-                    </Typography>
+                    <Box display="flex" alignItems="center" gap={1}>
+                      <Typography variant="h6" component="div">
+                        {agent.name}
+                      </Typography>
+                      <Chip
+                        label={agent.agent_type === 'supervisor' ? 'Supervisor' : 'Worker'}
+                        color={agent.agent_type === 'supervisor' ? 'secondary' : 'default'}
+                        size="small"
+                        variant="outlined"
+                      />
+                    </Box>
                     <Chip
                       label={getStatusLabel(agent.status)}
                       color={getStatusColor(agent.status)}
@@ -309,6 +337,18 @@ export default function Agents() {
                   <Typography variant="body2" color="textSecondary" paragraph>
                     {agent.description || '説明なし'}
                   </Typography>
+                  
+                  {agent.agent_type === 'supervisor' && agent.workers_count !== undefined && (
+                    <Typography variant="body2" color="textSecondary" gutterBottom>
+                      👥 管理中のWorker: {agent.workers_count}名
+                    </Typography>
+                  )}
+                  
+                  {agent.agent_type === 'worker' && agent.supervisor && (
+                    <Typography variant="body2" color="textSecondary" gutterBottom>
+                      👤 Supervisor: {agent.supervisor.name}
+                    </Typography>
+                  )}
                   
                   <Box mt={2}>
                     <Typography variant="caption" color="textSecondary" display="block">
@@ -371,6 +411,44 @@ export default function Agents() {
               multiline
               rows={3}
             />
+            <TextField
+              label="エージェントタイプ"
+              value={formData.agent_type}
+              onChange={(e) => {
+                const newType = e.target.value as 'worker' | 'supervisor'
+                setFormData({
+                  ...formData,
+                  agent_type: newType,
+                  supervisor_id: newType === 'supervisor' ? undefined : formData.supervisor_id
+                })
+              }}
+              select
+              fullWidth
+              required
+            >
+              <MenuItem value="worker">Worker (タスク実行)</MenuItem>
+              <MenuItem value="supervisor">Supervisor (チーム管理)</MenuItem>
+            </TextField>
+            {formData.agent_type === 'worker' && (
+              <TextField
+                label="スーパーバイザー"
+                value={formData.supervisor_id || ''}
+                onChange={(e) => setFormData({
+                  ...formData,
+                  supervisor_id: e.target.value ? Number(e.target.value) : undefined
+                })}
+                select
+                fullWidth
+                helperText="このWorkerを管理するSupervisorを選択（任意）"
+              >
+                <MenuItem value="">なし</MenuItem>
+                {availableSupervisors.map((supervisor) => (
+                  <MenuItem key={supervisor.id} value={supervisor.id}>
+                    {supervisor.name}
+                  </MenuItem>
+                ))}
+              </TextField>
+            )}
             <TextField
               label="LLMプロバイダー"
               value={formData.llm_provider}

@@ -5,6 +5,9 @@ from dotenv import load_dotenv
 # .envファイルを読み込む
 load_dotenv()
 
+# ベースディレクトリを取得（backend/app/config.pyの場所から2階層上がbackend/）
+basedir = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+
 
 class Config:
     """基本設定"""
@@ -13,7 +16,9 @@ class Config:
     SECRET_KEY = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
     
     # Database
-    SQLALCHEMY_DATABASE_URI = os.getenv('DATABASE_URL', 'sqlite:///ai_agent_team.db')
+    # 絶対パスを使用してデータベースファイルを指定
+    db_path = os.path.join(basedir, 'data', 'ai_agent_team.db')
+    SQLALCHEMY_DATABASE_URI = os.getenv('DATABASE_URL', f'sqlite:///{db_path}')
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     SQLALCHEMY_ECHO = False
     
